@@ -38,7 +38,8 @@ const float fCurrentMultiplier= 0.015;      //TODO adjust value
 
 // flag setup
 volatile int iZCVoltageFlag =0; // flag raised on zero crossing voltage
-volatile int iReadDACFlag =0;   // flag raised when reading ADC phase and lowered otherwise when computing data
+volatile int iReadADCFlag =0;   // flag raised when reading ADC phase and lowered otherwise when computing data
+volatile int iTimerFlag = 1; //flag raised by timer
 
 // mutex for critical flags
 portMUX_TYPE muxZCVoltageFlag = portMUX_INITIALIZER_UNLOCKED;
@@ -65,10 +66,10 @@ float fCurrentRMS = 0.0;
 
 // Convertion and computation rms
 float fnADC2Voltage (int ADCVoltageValue){
-    return ( fVoltageMultiplier * (ADCVoltageValue-iADCVoltageZeroValue) );
+    return ( fVoltageMultiplier * (ADCVoltageValue-iADCVoltageZeroValue) );}
 
 float fnADC2Current (int ADCCurrentValue){
-    return ( fCurrentMultiplier * (ADCCurrentValue-iADCCurrentZeroValue) );
+    return ( fCurrentMultiplier * (ADCCurrentValue-iADCCurrentZeroValue) );}
 
 void fnComputeRMS(){
     for (int i=0;i<iNbMeas ;i++) {
@@ -119,14 +120,14 @@ void fnProcessZCVoltageFlag(){
 
 void fnProcessTimerFlag(){
     if (iAction ==0){
-        tmp = adc1_get_raw(ADC_VOLTAGE);
+        int tmp = adc1_get_raw(ADC_VOLTAGE);
         if (tmp>=0){
             piADCVoltageRead[iNbMeas] = tmp;
             iNbMeas++;
         }
     }
     if (iAction ==1){
-        tmp = adc1_get_raw(ADC_CURRENT);
+        int tmp = adc1_get_raw(ADC_CURRENT);
         if (tmp>=0){
             piADCCurrentRead[iCurrentADCPos] = tmp;
             iCurrentADCPos++;
@@ -161,7 +162,7 @@ void app_main()
 
 
 // ISR settings
-    attachInterrupt(digitalPinToInterrupt(pinZCVoltage), ISRZCVoltage, FALLING);
+   // attachInterrupt(digitalPinToInterrupt(pinZCVoltage), ISRZCVoltage, FALLING);
 
 
     piADCVoltageRead = malloc(1000*sizeof(int));
@@ -170,8 +171,8 @@ void app_main()
     //setup ADC
     adc_power_on();
     adc1_config_width(ADC_WIDTH_BIT_12);
-    adc1_config_channel_atten(ADC_VOLTAGE,ADC_ATTEN_DB0);
-    adc1_config_channel_atten(ADC_CURRENT,ADC_ATTEN_DB0);
+    adc1_config_channel_atten(ADC_VOLTAGE,ADC_ATTEN_DB_0);
+    adc1_config_channel_atten(ADC_CURRENT,ADC_ATTEN_DB_0);
     
     
 
