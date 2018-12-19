@@ -12,12 +12,19 @@
 #include "esp_system.h"
 #include "esp_spi_flash.h"
 #include "math.h"
+#include <driver/adc.h>
 
+/*
 // pin setup
 const int pinLed = 26;
 const int pinZCVoltage = 0 ; // pin zero crossing voltage TODO change for true value
 const int pinADCVoltage = 0; // analog pin for voltage TODO change for true value
 const int pinADCCurrent = 0; // analog pin for current TODO change for true value
+*/
+
+#define ADC_VOLTAGE ADC1_CHANNEL_4 //CH4 = GPIO32 ... CH7 =GPIO37. WARNING DO NOT, repeat NOT use others WARNING
+#define ADC_CURRENT ADC1_CHANNEL_5
+
 
 
 
@@ -31,9 +38,7 @@ const float fCurrentMultiplier= 0.015;      //TODO adjust value
 
 // flag setup
 volatile int iZCVoltageFlag =0; // flag raised on zero crossing voltage
-volatile int iSetupFlag =1;     // flag used for synchro on voltage zero crossing
-volatile long lTimeAtZCVoltage;
-volatile int iReadDACFlag =0;   // flag raised when reading ADC phase and lowered otherwise
+volatile int iReadDACFlag =0;   // flag raised when reading ADC phase and lowered otherwise when computing data
 
 // mutex for critical flags
 portMUX_TYPE muxZCVoltageFlag = portMUX_INITIALIZER_UNLOCKED;
@@ -42,9 +47,8 @@ portMUX_TYPE muxReadADCFlag = portMUX_INITIALIZER_UNLOCKED;
 
 // synchro values
 int iCountZCVoltage=0;
-long lHalfPeriod =0;
-long lElapsedTimeSetup=0;
-
+int iCurrentADCPos=0;
+int iAction =0; // 0 read voltage, 1 read current, 2 compute
 
 
 // Data
@@ -76,7 +80,7 @@ void fnComputeRMS(){
     }
     fMeanActivePower = fMeanActivePower/iNbMeas;
     fVoltageRMS = sqrt(fVoltageRMS)/iNbMeas;
-    fCurrentRMS = sqrt(fCurrentRMS)/iNbMeas;
+    fCurrentRMS = sqrt(fCurrentRMS)/iCurrentADCPos;
     fMeanApparentPower = fVoltageRMS * fCurrentRMS;
     fCosPhi = fMeanActivePower / fMeanApparentPower;
 }
@@ -85,13 +89,10 @@ void fnComputeRMS(){
 
 // interupt handlers
 void IRAM_ATTR ISRZCVoltage(){
-    lTimeAtZCVoltage = 0 // TODO timer value
     // TODO rst timer
-    if (iSetupFlag) {
-        portENTER_CRITICAL_ISR(&muxZCVoltageFlag);
-        iZCVoltageFlag =1;
-        portEXIT_CRITICAL_ISR(&muxZCVoltageFlag);
-    }
+    portENTER_CRITICAL_ISR(&muxZCVoltageFlag);
+    iZCVoltageFlag =1;
+    portEXIT_CRITICAL_ISR(&muxZCVoltageFlag);
 }
 
 
@@ -100,18 +101,39 @@ void IRAM_ATTR ISRZCVoltage(){
 // Process flags
 void fnProcessZCVoltageFlag(){
     iCountZCVoltage++;
-    if (iCountZCVoltage!=1){
-        lElapsedTimeSetup += lTimeAtZCVoltage;
+    if (iCountZCVoltage%2 == 0){
+        iAction = (iAction +1)%3;
     }
-    if (iCountZCVoltage == 31) { //30 periods elapsed, 60 halfPeriods
-        lHalfPeriod = lElapsedTimeSetup /60;
-        //TODO setup timer w/ halfperiod
-        iSetupFlag = 0;
+    if (iAction == 3) {
+        iReadADCFlag = 0; 
+        fnComputeRMS();
+        iNbMeas = 0; iCurrentADCPos = 0;
+        iReadADCFlag = 1;
+    }
+    else{
     }
     portENTER_CRITICAL(&muxZCVoltageFlag);
     iZCVoltageFlag = 0;
     portEXIT_CRITICAL(&muxZCVoltageFlag);
 }
+
+void fnProcessTimerFlag(){
+    if (iAction ==0){
+        tmp = adc1_get_raw(ADC_VOLTAGE);
+        if (tmp>=0){
+            piADCVoltageRead[iNbMeas] = tmp;
+            iNbMeas++;
+        }
+    }
+    if (iAction ==1){
+        tmp = adc1_get_raw(ADC_CURRENT);
+        if (tmp>=0){
+            piADCCurrentRead[iCurrentADCPos] = tmp;
+            iCurrentADCPos++;
+        }
+    }
+}
+
 
 
 
@@ -142,11 +164,21 @@ void app_main()
     attachInterrupt(digitalPinToInterrupt(pinZCVoltage), ISRZCVoltage, FALLING);
 
 
-
+    piADCVoltageRead = malloc(1000*sizeof(int));
+    piADCCurrentRead = malloc(1000*sizeof(int));
+    
+    //setup ADC
+    adc_power_on();
+    adc1_config_width(ADC_WIDTH_BIT_12);
+    adc1_config_channel_atten(ADC_VOLTAGE,ADC_ATTEN_DB0);
+    adc1_config_channel_atten(ADC_CURRENT,ADC_ATTEN_DB0);
+    
+    
 
     while (1){
 
     if (iZCVoltageFlag) {fnProcessZCVoltageFlag();}
+    if (iTimerFlag) {fnProcessTimerFlag();}
 
     }
 
