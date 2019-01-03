@@ -13,6 +13,8 @@
 #include "esp_spi_flash.h"
 #include "math.h"
 #include <driver/adc.h>
+#include <driver/gpio.h>
+#include <driver/timer.h>
 
 /*
 // pin setup
@@ -39,11 +41,11 @@ const float fCurrentMultiplier= 0.015;      //TODO adjust value
 // flag setup
 volatile int iZCVoltageFlag =0; // flag raised on zero crossing voltage
 volatile int iReadADCFlag =0;   // flag raised when reading ADC phase and lowered otherwise when computing data
-volatile int iTimerFlag = 1; //flag raised by timer
+volatile int iTimerFlag = 0; //flag raised by timer
 
 // mutex for critical flags
 portMUX_TYPE muxZCVoltageFlag = portMUX_INITIALIZER_UNLOCKED;
-portMUX_TYPE muxReadADCFlag = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE muxTimerFlag = portMUX_INITIALIZER_UNLOCKED;
 
 
 // synchro values
@@ -96,7 +98,11 @@ void IRAM_ATTR ISRZCVoltage(){
     portEXIT_CRITICAL_ISR(&muxZCVoltageFlag);
 }
 
-
+void ISRTimer(){
+    portENTER_CRITICAL_ISR(&muxTimerFlag);
+    iTimerFlag =1;
+    portEXIT_CRITICAL_ISR(&muxTimerFlag);
+}
 
 
 // Process flags
@@ -133,6 +139,10 @@ void fnProcessTimerFlag(){
             iCurrentADCPos++;
         }
     }
+    portENTER_CRITICAL(&muxTimerFlag);
+    iTimerFlag = 0;
+    portEXIT_CRITICAL(&muxTimerFlag);
+    
 }
 
 
@@ -162,8 +172,27 @@ void app_main()
 
 
 // ISR settings
-   // attachInterrupt(digitalPinToInterrupt(pinZCVoltage), ISRZCVoltage, FALLING);
+    gpio_pad_select_gpio(GPIO_NUM_5);
+    gpio_set_direction(GPIO_NUM_5, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(GPIO_NUM_5, GPIO_PULLUP_ONLY);
+    gpio_set_intr_type(GPIO_NUM_5, GPIO_INTR_NEGEDGE);
+    gpio_intr_enable(GPIO_NUM_5);
+    gpio_isr_register(ISRZCVoltage, NULL, 0, 0);
 
+
+// timer setting
+    // attachInterrupt(digitalPinToInterrupt(pinZCVoltage), ISRZCVoltage, FALLING);
+    timer_set_counter_mode(TIMER_GROUP_0, TIMER_0,TIMER_COUNT_UP);
+    timer_set_auto_reload(TIMER_GROUP_0, TIMER_0, TIMER_AUTORELOAD_EN);
+    timer_set_divider(TIMER_GROUP_0, TIMER_0,80);
+    timer_set_alarm_value(TIMER_GROUP_0, TIMER_0,100);
+    timer_set_alarm(TIMER_GROUP_0, TIMER_0,TIMER_ALARM_EN);
+    //timer_isr_register(timer_group_t group_num, timer_idx_t timer_num, void (*fn)(void*), void * arg, int intr_alloc_flags, timer_isr_handle_t *handle);
+    timer_isr_register(TIMER_GROUP_0, TIMER_0, ISRTimer , NULL, 0, NULL);
+    timer_group_intr_enable(TIMER_GROUP_0, TIMG_T0_INT_ENA_M);
+    timer_start(TIMER_GROUP_0, TIMER_0);
+    
+    
 
     piADCVoltageRead = malloc(1000*sizeof(int));
     piADCCurrentRead = malloc(1000*sizeof(int));
