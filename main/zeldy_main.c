@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 #include "esp_system.h"
 #include "esp_spi_flash.h"
 #include "math.h"
@@ -30,7 +31,7 @@ const int pinADCCurrent = 0; // analog pin for current TODO change for true valu
 #define ADC_CURRENT ADC1_CHANNEL_5
 
 // TIMER SETUP
-#define TIMER_PERIODE_MS 1000000
+#define TIMER_PERIODE_US 1000000
 
 
 
@@ -43,9 +44,14 @@ const float fCurrentMultiplier= 0.015;      //TODO adjust value
 
 
 // flag setup
-volatile int iZCVoltageFlag =0; // flag raised on zero crossing voltage
-volatile int iReadADCFlag =0;   // flag raised when reading ADC phase and lowered otherwise when computing data
-volatile int iTimerFlag = 0; //flag raised by timer
+/*volatile int iZCVoltageFlag =0; // flag raised on zero crossing voltage
+volatile int iReadADCFlag =0;
+volatile int iTimerFlag = 0;
+*/
+volatile  EventGroupHandle_t EventGroup;
+#define FLAG_iZCVoltage (1<<0) // flag raised on zero crossing voltage
+#define FLAG_iReadADC   (1<<1) // flag raised when reading ADC phase and lowered otherwise when computing data
+#define FLAG_iTimer     (1<<2) //flag raised by timer
 
 // mutex for critical flags
 portMUX_TYPE muxZCVoltageFlag = portMUX_INITIALIZER_UNLOCKED;
@@ -99,30 +105,35 @@ void fnComputeRMS(){
 
 // interupt handlers
 static void IRAM_ATTR ISRZCVoltage(void * args){
+    BaseType_t xHigherPriorityTaskWoken;
     ESP_LOGI("ISR ZC Voltage::", "Called");
+
     // Rst timer
     ESP_ERROR_CHECK(esp_timer_stop(periodic_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, TIMER_PERIODE_MS));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, TIMER_PERIODE_US));
     ESP_LOGI("ISR ZC Voltage::","Timer reset");
 
+    /*
+     *  used as a light weight and faster binary or counting semaphore alternative.
+     */
+    xHigherPriorityTaskWoken = pdFALSE;
+    xEventGroupSetBitsFromISR(
+            EventGroup,   /* The event group being updated. */
+           FLAG_iZCVoltage, /* The bits being set. */
+            &xHigherPriorityTaskWoken );
 
-    portENTER_CRITICAL_ISR(&muxZCVoltageFlag);
-    iZCVoltageFlag =1;
-    portEXIT_CRITICAL_ISR(&muxZCVoltageFlag);
     ESP_LOGI("ISR ZC Voltage::" ,"Exited");
 }
 
 static void ISRTimer(void * stuff){
+    BaseType_t xHigherPriorityTaskWoken;
     ESP_LOGI("ISR Timer::","called");
-    portENTER_CRITICAL_ISR(&muxTimerFlag);
-    iTimerFlag =1;
-    portEXIT_CRITICAL_ISR(&muxTimerFlag);
-    /* timer_pause(TIMER_GROUP_0, TIMER_0);
-     timer_set_counter_value(TIMER_GROUP_0, TIMER_GROUP_0, 0x00000000ULL);
-     timer_set_alarm_value(TIMER_GROUP_0, TIMER_0,1000);
-     timer_set_alarm(TIMER_GROUP_0, TIMER_0,TIMER_ALARM_EN );
-     timer_start(TIMER_GROUP_0, TIMER_0);
-     */
+    xHigherPriorityTaskWoken = pdFALSE;
+    xEventGroupSetBitsFromISR(
+            EventGroup,   /* The event group being updated. */
+            FLAG_iTimer, /* The bits being set. */
+            &xHigherPriorityTaskWoken );
+
     ESP_LOGI("ISR Timer::","exit");
 }
 
@@ -133,38 +144,56 @@ void fnProcessZCVoltageFlag(){
     if (iCountZCVoltage%2 == 0){
         iAction = (iAction +1)%3;
     }
-    if (iAction == 3) {
-        iReadADCFlag = 0; 
+    if (iAction == 2) {
+
+        xEventGroupClearBits(
+                EventGroup,  /* The event group being updated. */
+                FLAG_iReadADC );/* The bits being cleared. */
+        //iReadADCFlag = 0;
         fnComputeRMS();
         iNbMeas = 0;
         iCurrentADCPos = 0;
-        iReadADCFlag = 1;
+
+        xEventGroupSetBits(
+                EventGroup,  /* The event group being updated. */
+                FLAG_iReadADC );/* The bits being cleared. */
+       // iReadADCFlag = 1;
     }
     else{
     }
-    portENTER_CRITICAL(&muxZCVoltageFlag);
+    xEventGroupClearBits(
+            EventGroup,  /* The event group being updated. */
+            FLAG_iZCVoltage );/* The bits being cleared. */
+  /*  portENTER_CRITICAL(&muxZCVoltageFlag);
     iZCVoltageFlag = 0;
-    portEXIT_CRITICAL(&muxZCVoltageFlag);
+    portEXIT_CRITICAL(&muxZCVoltageFlag);*/
 }
 
 void fnProcessTimerFlag(){
+    ESP_LOGI("Process timer::", "Process timer called action %d", iAction);
+    int tmp;
     if (iAction ==0){
-        int tmp = adc1_get_raw(ADC_VOLTAGE);
+         tmp = adc1_get_raw(ADC_VOLTAGE);
+        ESP_LOGI("Process timer::", "Read ADC returns %d", tmp);
         if (tmp>=0){
             piADCVoltageRead[iNbMeas] = tmp;
             iNbMeas++;
         }
     }
     if (iAction ==1){
-        int tmp = adc1_get_raw(ADC_CURRENT);
+        tmp = adc1_get_raw(ADC_CURRENT);
         if (tmp>=0){
             piADCCurrentRead[iCurrentADCPos] = tmp;
             iCurrentADCPos++;
         }
     }
-   portENTER_CRITICAL(&muxTimerFlag);
+    xEventGroupClearBits(
+            EventGroup,  /* The event group being updated. */
+            FLAG_iTimer);/* The bits being cleared. */
+  /* portENTER_CRITICAL(&muxTimerFlag);
     iTimerFlag = 0;
      portEXIT_CRITICAL(&muxTimerFlag);
+     */
     
 }
 
@@ -173,10 +202,10 @@ void fnProcessTimerFlag(){
 
 void app_main()
 {
+    BaseType_t uxBits;
     esp_err_t err;
     err = nvs_flash_init();
     ESP_ERROR_CHECK(err);
-    uint64_t tval;
     printf("Hello world!\n");
 
     /* Print chip information */
@@ -193,7 +222,12 @@ void app_main()
             (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
 
 
-    //fflush(stdout);
+    //Event signaling
+    EventGroup = xEventGroupCreate();
+    if( EventGroup == NULL )
+    {
+        ESP_LOGE("App main", "Event group creation failed");
+    }
 
 
 
@@ -213,10 +247,10 @@ void app_main()
     const esp_timer_create_args_t periodic_timer_args = {
             .callback = &ISRTimer,
             /* name is optional, but may help identify the timer when debugging */
-            .name = "periodic"
+            .name = "periodic timer"
     };
     ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, TIMER_PERIODE_MS));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, TIMER_PERIODE_US));
 
 
 
@@ -231,16 +265,20 @@ void app_main()
     ESP_ERROR_CHECK(adc1_config_channel_atten(ADC_CURRENT,ADC_ATTEN_DB_0));
 
 
-    //xTaskCreate(&fnProcessTimerFlag, "fnProcessTimerFlag", 4096, NULL , 5, NULL);
-
     while (1){
-       // timer_get_counter_value(TIMER_GROUP_0, TIMER_0 , &tval);
-    printf("t:%lld [%d]\n",esp_timer_get_time() , iTimerFlag);
-        if (iZCVoltageFlag) {fnProcessZCVoltageFlag();}
-        if (iTimerFlag) {fnProcessTimerFlag();}
-    vTaskDelay(50);
+
+        uxBits = xEventGroupWaitBits(
+                EventGroup,   /* The event group being tested. */
+                FLAG_iZCVoltage  | FLAG_iTimer, /* The bits within the event group to wait for. */
+                pdFALSE,        /* Flag bits should not be cleared before returning. */
+                pdFALSE,       /* Don't wait for both bits, either bit will do. */
+                portMAX_DELAY  );/* Wait a maximum */
+        if( ( uxBits & FLAG_iZCVoltage ) != 0 ){
+            fnProcessZCVoltageFlag();
+        }else if (  ( uxBits & FLAG_iTimer ) != 0 ){
+            fnProcessTimerFlag();
+        }
+        ESP_LOGI("Main Loop::", "Event has been triggered");
     }
 
-
-    //esp_restart();
 }
