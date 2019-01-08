@@ -15,6 +15,8 @@
 #include <driver/adc.h>
 #include <driver/gpio.h>
 #include <driver/timer.h>
+#include "nvs_flash.h"
+#include "esp_log.h"
 
 /*
 // pin setup
@@ -27,6 +29,8 @@ const int pinADCCurrent = 0; // analog pin for current TODO change for true valu
 #define ADC_VOLTAGE ADC1_CHANNEL_4 //CH4 = GPIO32 ... CH7 =GPIO37. WARNING DO NOT, repeat NOT use others WARNING
 #define ADC_CURRENT ADC1_CHANNEL_5
 
+// TIMER SETUP
+#define TIMER_PERIODE_MS 1000000
 
 
 
@@ -64,6 +68,9 @@ float fMeanApparentPower=0.0;
 float fVoltageRMS = 0.0;
 float fCurrentRMS = 0.0;
 
+//Timers
+static esp_timer_handle_t periodic_timer;
+
 
 
 // Convertion and computation rms
@@ -91,17 +98,32 @@ void fnComputeRMS(){
 
 
 // interupt handlers
-void IRAM_ATTR ISRZCVoltage(){
-    // TODO rst timer
+static void IRAM_ATTR ISRZCVoltage(void * args){
+    ESP_LOGI("ISR ZC Voltage::", "Called");
+    // Rst timer
+    ESP_ERROR_CHECK(esp_timer_stop(periodic_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, TIMER_PERIODE_MS));
+    ESP_LOGI("ISR ZC Voltage::","Timer reset");
+
+
     portENTER_CRITICAL_ISR(&muxZCVoltageFlag);
     iZCVoltageFlag =1;
     portEXIT_CRITICAL_ISR(&muxZCVoltageFlag);
+    ESP_LOGI("ISR ZC Voltage::" ,"Exited");
 }
 
-void ISRTimer(){
+static void ISRTimer(void * stuff){
+    ESP_LOGI("ISR Timer::","called");
     portENTER_CRITICAL_ISR(&muxTimerFlag);
     iTimerFlag =1;
     portEXIT_CRITICAL_ISR(&muxTimerFlag);
+    /* timer_pause(TIMER_GROUP_0, TIMER_0);
+     timer_set_counter_value(TIMER_GROUP_0, TIMER_GROUP_0, 0x00000000ULL);
+     timer_set_alarm_value(TIMER_GROUP_0, TIMER_0,1000);
+     timer_set_alarm(TIMER_GROUP_0, TIMER_0,TIMER_ALARM_EN );
+     timer_start(TIMER_GROUP_0, TIMER_0);
+     */
+    ESP_LOGI("ISR Timer::","exit");
 }
 
 
@@ -114,7 +136,8 @@ void fnProcessZCVoltageFlag(){
     if (iAction == 3) {
         iReadADCFlag = 0; 
         fnComputeRMS();
-        iNbMeas = 0; iCurrentADCPos = 0;
+        iNbMeas = 0;
+        iCurrentADCPos = 0;
         iReadADCFlag = 1;
     }
     else{
@@ -139,9 +162,9 @@ void fnProcessTimerFlag(){
             iCurrentADCPos++;
         }
     }
-    portENTER_CRITICAL(&muxTimerFlag);
+   portENTER_CRITICAL(&muxTimerFlag);
     iTimerFlag = 0;
-    portEXIT_CRITICAL(&muxTimerFlag);
+     portEXIT_CRITICAL(&muxTimerFlag);
     
 }
 
@@ -150,6 +173,10 @@ void fnProcessTimerFlag(){
 
 void app_main()
 {
+    esp_err_t err;
+    err = nvs_flash_init();
+    ESP_ERROR_CHECK(err);
+    uint64_t tval;
     printf("Hello world!\n");
 
     /* Print chip information */
@@ -166,50 +193,52 @@ void app_main()
             (chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
 
 
-    fflush(stdout);
+    //fflush(stdout);
 
 
 
 
 // ISR settings
     gpio_pad_select_gpio(GPIO_NUM_5);
-    gpio_set_direction(GPIO_NUM_5, GPIO_MODE_INPUT);
-    gpio_set_pull_mode(GPIO_NUM_5, GPIO_PULLUP_ONLY);
-    gpio_set_intr_type(GPIO_NUM_5, GPIO_INTR_NEGEDGE);
-    gpio_intr_enable(GPIO_NUM_5);
-    gpio_isr_register(ISRZCVoltage, NULL, 0, 0);
+    ESP_ERROR_CHECK(gpio_set_direction(GPIO_NUM_5, GPIO_MODE_INPUT));
+    ESP_ERROR_CHECK(gpio_set_pull_mode(GPIO_NUM_5, GPIO_PULLUP_ONLY));
+    ESP_ERROR_CHECK(gpio_set_intr_type(GPIO_NUM_5, GPIO_INTR_NEGEDGE));
+    ESP_ERROR_CHECK(gpio_intr_enable(GPIO_NUM_5));
+    ESP_ERROR_CHECK(gpio_isr_register(ISRZCVoltage, NULL, 0, 0));
 
+
+    printf("Start config\n");
 
 // timer setting
-    // attachInterrupt(digitalPinToInterrupt(pinZCVoltage), ISRZCVoltage, FALLING);
-    timer_set_counter_mode(TIMER_GROUP_0, TIMER_0,TIMER_COUNT_UP);
-    timer_set_auto_reload(TIMER_GROUP_0, TIMER_0, TIMER_AUTORELOAD_EN);
-    timer_set_divider(TIMER_GROUP_0, TIMER_0,80);
-    timer_set_alarm_value(TIMER_GROUP_0, TIMER_0,100);
-    timer_set_alarm(TIMER_GROUP_0, TIMER_0,TIMER_ALARM_EN);
-    //timer_isr_register(timer_group_t group_num, timer_idx_t timer_num, void (*fn)(void*), void * arg, int intr_alloc_flags, timer_isr_handle_t *handle);
-    timer_isr_register(TIMER_GROUP_0, TIMER_0, ISRTimer , NULL, 0, NULL);
-    timer_group_intr_enable(TIMER_GROUP_0, TIMG_T0_INT_ENA_M);
-    timer_start(TIMER_GROUP_0, TIMER_0);
-    
-    
+    const esp_timer_create_args_t periodic_timer_args = {
+            .callback = &ISRTimer,
+            /* name is optional, but may help identify the timer when debugging */
+            .name = "periodic"
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, TIMER_PERIODE_MS));
+
+
 
     piADCVoltageRead = malloc(1000*sizeof(int));
     piADCCurrentRead = malloc(1000*sizeof(int));
-    
+
+
     //setup ADC
     adc_power_on();
-    adc1_config_width(ADC_WIDTH_BIT_12);
-    adc1_config_channel_atten(ADC_VOLTAGE,ADC_ATTEN_DB_0);
-    adc1_config_channel_atten(ADC_CURRENT,ADC_ATTEN_DB_0);
-    
-    
+    ESP_ERROR_CHECK(adc1_config_width(ADC_WIDTH_BIT_12));
+    ESP_ERROR_CHECK(adc1_config_channel_atten(ADC_VOLTAGE,ADC_ATTEN_DB_0));
+    ESP_ERROR_CHECK(adc1_config_channel_atten(ADC_CURRENT,ADC_ATTEN_DB_0));
+
+
+    //xTaskCreate(&fnProcessTimerFlag, "fnProcessTimerFlag", 4096, NULL , 5, NULL);
 
     while (1){
-
-    if (iZCVoltageFlag) {fnProcessZCVoltageFlag();}
-    if (iTimerFlag) {fnProcessTimerFlag();}
-
+       // timer_get_counter_value(TIMER_GROUP_0, TIMER_0 , &tval);
+    printf("t:%lld [%d]\n",esp_timer_get_time() , iTimerFlag);
+        if (iZCVoltageFlag) {fnProcessZCVoltageFlag();}
+        if (iTimerFlag) {fnProcessTimerFlag();}
+    vTaskDelay(50);
     }
 
 
