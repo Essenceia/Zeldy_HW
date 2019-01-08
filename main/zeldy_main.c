@@ -87,6 +87,7 @@ float fnADC2Current (int ADCCurrentValue){
     return ( fCurrentMultiplier * (ADCCurrentValue-iADCCurrentZeroValue) );}
 
 void fnComputeRMS(){
+    ESP_LOGI("ComputeRMS::", "Computing for iNbMeas=%d", iNbMeas);
     for (int i=0;i<iNbMeas ;i++) {
         float tempV = fnADC2Voltage(piADCVoltageRead[i]);
         float tempI = fnADC2Current(piADCCurrentRead[i]);
@@ -99,6 +100,8 @@ void fnComputeRMS(){
     fCurrentRMS = sqrt(fCurrentRMS)/iCurrentADCPos;
     fMeanApparentPower = fVoltageRMS * fCurrentRMS;
     fCosPhi = fMeanActivePower / fMeanApparentPower;
+    ESP_LOGI("ComputeRMS::", "Results CosPhi=%f", fCosPhi);
+
 }
 
 
@@ -141,9 +144,14 @@ static void ISRTimer(void * stuff){
 // Process flags
 void fnProcessZCVoltageFlag(){
     iCountZCVoltage++;
+
     if (iCountZCVoltage%2 == 0){
         iAction = (iAction +1)%3;
+
     }
+
+    ESP_LOGI("Process ZC Voltage::", "iCountZCVoltage %d, iAction %d", iCountZCVoltage,iAction);
+
     if (iAction == 2) {
 
         xEventGroupClearBits(
@@ -174,16 +182,20 @@ void fnProcessTimerFlag(){
     int tmp;
     if (iAction ==0){
          tmp = adc1_get_raw(ADC_VOLTAGE);
-        ESP_LOGI("Process timer::", "Read ADC returns %d", tmp);
+        ESP_LOGI("Process timer::", "Read ADC voltage returns %d", tmp);
         if (tmp>=0){
             piADCVoltageRead[iNbMeas] = tmp;
             iNbMeas++;
+            ESP_LOGI("Process timer::", "Increment iNbMeas new val %d", iNbMeas);
         }
     }
     if (iAction ==1){
         tmp = adc1_get_raw(ADC_CURRENT);
+        ESP_LOGI("Process timer::", "Read ADC current returns %d", tmp);
         if (tmp>=0){
             piADCCurrentRead[iCurrentADCPos] = tmp;
+            ESP_LOGI("Process timer::", "Increment iCurrentADCPos new val %d", iCurrentADCPos);
+
             iCurrentADCPos++;
         }
     }
